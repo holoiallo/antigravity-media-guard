@@ -67,24 +67,72 @@ git clone https://github.com/holoiallo/antigravity-media-guard.git ~/.gemini/con
 
 ## 使用指南
 
-### 1. 日常使用（全自动无感触发）
+### 1. 精确判定矩阵与具体阈值（核心数据一览）
 
-安装并启用后无需手动敲命令，直接把本地视频/音频路径发给 Agent 即可：
-* **中小视频（`≤ 15 MB`）**：若主会话尝试直读，Hook 会自动拦截并引导 Agent 派一个一次性子代理观看原片后返回文字总结，**主会话完全不挂载任何视频二进制**。
-* **超大视频（`> 15 MB`）**：Agent 会自动调用 `media-safe-read` 技能和 `prep_media.mjs` 先做抽帧/提音轨/切片，再进行针对性分析。
+插件按**会话类型（主会话 vs 隔离子代理）**、**文件类型**与**体积阈值**执行以下确定性策略：
 
-### 2. 长视频精细动作 / 物体动态运动怎么看？
+| 场景 / 媒体类型 | 条件与数据阈值 | Hook 决策 | 具体处理方式与输出 |
+| :--- | :--- | :--- | :--- |
+| **非媒体文件 / 不存在路径** | `.ts/.py/.json/.md/.pdf` 等或缺失文件 | `allow`（放行） | 直接放行，0 阻塞；异常/解析失败也 fail-open 放行。 |
+| **视频 / 音频（主会话）** | 任意体积（`> 0 B`） | `deny`（拦截） | **禁止直接挂入主会话历史**。提示 Agent 按文件大小走下述分支。 |
+| **视频 / 音频（隔离子代理）** | **单文件 `≤ 15 MB`** 且 **子代理累计 `≤ 20 MB`** | `allow`（放行） | 子代理用 `read_file` 看原画质、原帧率原片，只把纯文本总结回传主会话。 |
+| **视频 / 音频（隔离子代理）** | **单文件 `> 15 MB`** 或 **子代理累计 `> 20 MB`** | `deny`（拦截） | 阻止原片直读；强制先用 `prep_media.mjs` 预处理（或每个文件单开子代理 / 走 `gemini-api`）。 |
+| **图片（主会话 / 子代理）** | **单张 `≤ 15 MB`** 且 **当前会话累计 `≤ 25 MB`** | `allow`（放行） | 常规截图静默放行，不打扰日常 UI 调试。 |
+| **图片（主会话 / 子代理）** | **单张 `> 15 MB`** 或 **当前会话累计 `> 25 MB`** | `ask`（弹窗确认） | 提示已占用的 `logs/media/` 累计体积，由你决定放行或改走缩放/子代理。 |
 
-抽帧拼图（`keyframes`）会丢失连续帧率，如果要在几十 MB 的长视频里分析物体运动、UI 掉帧或动作细节，建议让 Agent 按两步走（或直接这样提示）：
+---
 
-1. 先用关键帧定位动作发生的时间窗口：
-   ```bash
-   node ~/.gemini/config/plugins/media-guard/scripts/prep_media.mjs --input "demo.mp4" --mode keyframes --cols 4 --rows 3
-   ```
-2. 再用 `--mode clip` 把目标十几秒的高帧率片段单独切出来，交给一次性子代理看原画动态：
-   ```bash
-   node ~/.gemini/config/plugins/media-guard/scripts/prep_media.mjs --input "demo.mp4" --mode clip --start 00:01:20 --duration 15
-   ```
+### 2. 具体操作方式：小于等于 15 MB vs 大于 15 MB 怎么处理？
+
+#### 情况 A：视频 / 音频 `≤ 15 MB`（如几秒～数分钟录屏、常规短视频）
+
+1. 你直接把路径发给 Antigravity（例如：“帮我分析 `C:\Videos\bug.mp4` 里第 10 秒动画为什么卡顿”）。
+2. 如果主会话尝试直接 `read_file`，`PreToolUse` Hook 会拦截并提示改用子代理隔离。
+3. Agent 自动调用 `invoke_subagent`（一次性子代理）执行 `read_file`：
+   * 子代理看到的是**未经压缩、原帧率（30/60fps）、带完整音轨**的原片；
+   * Hook 校验 `文件 ≤ 15 MB` 且 `累计 ≤ 20 MB` 后自动 `allow`；
+   * 子代理把分析结果以**纯文本**返回主会话，主会话 `logs/media/` 保持 `0 MB` 增量。
+4. **注意**：若同一轮需要对比 2 个视频（例如 `12 MB + 12 MB = 24 MB > 20 MB`），应分别派两个子代理各看一个，再由主会话汇总对比。
+
+#### 情况 B：视频 `> 15 MB`（大视频 / 长视频），有 4 种具体处理路径
+
+根据你想看“整体内容”“语音内容”还是“精细动态运动”，选择对应模式：
+
+1. **总览长视频结构 → 关键帧缩略图网格（`--mode keyframes`）**
+   * **操作命令**：
+     ```bash
+     node ~/.gemini/config/plugins/media-guard/scripts/prep_media.mjs --input "demo.mp4" --mode keyframes --cols 4 --rows 3
+     ```
+   * **具体参数与输出**：默认抽取 `4×3 = 12` 帧（可用 `--cols` / `--rows` / `--interval <秒>` 调整），单格宽 `480px`（`scale=480:-1`），带时间戳水印，输出 `*_keyframes.jpg`（实测 191 秒 `7.6 MB` 视频输出仅 **`0.26 MB`**）。主会话或子代理可直接用 `read_file` 看这张拼图。
+
+2. **看长视频里的物体动态运动 / 掉帧细节 → 先定位再局部高清裁剪（`--mode clip`，最推荐）**
+   * **为什么不直接压缩整片**：整片硬压会降帧率、降清晰度，丢失高速运动细节。
+   * **两步操作**：
+     1. 先用上面的 `--mode keyframes` 定位动作发生的时间段（例如 `00:01:20` 左右）；
+     2. 再用 `--mode clip` 截取目标窗口（默认 `15` 秒）：
+        ```bash
+        node ~/.gemini/config/plugins/media-guard/scripts/prep_media.mjs --input "demo.mp4" --mode clip --start 00:01:20 --duration 15
+        ```
+   * **具体参数与输出**：使用 `libx264 -preset fast -crf 22` + `aac 96k`，**保留原片原始分辨率与原始帧率**。十几秒的高清片段通常只有几 MB（`≤ 15 MB`），直接交给一次性子代理看原画运动即可。
+
+3. **只听口播 / 会议 / 语音内容 → 提取单声道轻量音频（`--mode audio`）**
+   * **操作命令**：
+     ```bash
+     node ~/.gemini/config/plugins/media-guard/scripts/prep_media.mjs --input "meeting.mp4" --mode audio
+     ```
+   * **具体参数与输出**：转出 `16000 Hz` 单声道 `32 kbps` MP3（约 **`240 KB / 分钟`**，约 60 分钟语音也仅 `~14 MB ≤ 15 MB`），交给一次性子代理读取。
+
+4. **需要看全片连贯画面 → 自动压制到 15 MB 以内（`--mode compress`）**
+   * **操作命令**：
+     ```bash
+     node ~/.gemini/config/plugins/media-guard/scripts/prep_media.mjs --input "demo.mp4" --mode compress --max-mb 12
+     ```
+   * **具体参数与输出**：限制最大宽度 `854px`、帧率 `15 fps`、音频单声道 `48 kbps` AAC，并按视频时长反推视频码率（限定在 `80 ~ 800 kbps` 之间）压出 `*_compact.mp4`（默认目标 `≤ 12 MB`，留足安全余量），再交给一次性子代理观看。
+   * **注意**：超过 ~15 分钟的长视频硬压进 `12 MB` 时码率会贴近下限 `80 kbps` 导致画质明显变糊，此时应改用方案 2（`clip` 分段）或配合 `GEMINI_API_KEY` 走 `gemini-api files upload`（上限 `2 GB`，服务端缓存 `48 小时`）。
+
+*(提示：也可先执行 `node .../prep_media.mjs --input "demo.mp4" --mode info` 查看视频精确时长、体积 MB、分辨率与音视频编码再决定模式。)*
+
+---
 
 ### 3. 如果某个旧会话已经被媒体卡爆了怎么办？
 
