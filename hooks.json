@@ -1,0 +1,16 @@
+{
+  "media-guard-read-file": {
+    "PreToolUse": [
+      {
+        "matcher": "read_file|view_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/read_file_guard.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

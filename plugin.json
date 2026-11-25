@@ -1,0 +1,14 @@
+{
+  "name": "media-guard",
+  "displayName": "Media Guard",
+  "version": "1.1.0",
+  "description": "Prevents Antigravity session freezes caused by embedding raw video/audio binaries in conversation history. Enforces balanced PreToolUse read_file guards, subagent isolation, and ffmpeg preprocessing.",
+  "author": "holoiallo",
+  "repository": "https://github.com/holoiallo/antigravity-media-guard",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "用 media-safe-read 安全分析这段本地视频",
+    "用 prep_media.mjs 裁剪视频指定片段或提取关键帧",
+    "检查当前媒体文件大小并决定走子代理还是预处理"
+  ]
+}
